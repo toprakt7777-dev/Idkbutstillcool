@@ -2,7 +2,7 @@
 --  BLOX FRUITS HUB — MOBILE + QUEUE-ON-TELEPORT EDITION
 --  Replace HUB_SCRIPT_URL below with the RAW URL of THIS script
 --==================================================================
-local HUB_SCRIPT_URL = "https://raw.githubusercontent.com/toprakt7777/Idkbutstillcool/main/Bfscript.lua"
+local HUB_SCRIPT_URL = "https://raw.githubusercontent.com/toprakt7777-dev/Idkbutstillcool/refs/heads/main/Bfscript.lua"
 --==================================================================
 
 if not game:IsLoaded() then game.Loaded:Wait() end
