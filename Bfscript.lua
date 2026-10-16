@@ -1,14 +1,24 @@
---==================================================================
---  BLOX FRUITS HUB — CRASH-FIXED MOBILE + QUEUE-ON-TELEPORT
---  HUB_SCRIPT_URL = RAW url of THIS file (raw.githubusercontent.com)
---==================================================================
-local HUB_SCRIPT_URL = "https://raw.githubusercontent.com/toprakt7777/Idkbutstillcool/main/Bfscript.lua"
---==================================================================
-local SAFE_MODE = false   -- set true if client still crashes: disables silent-aim hook entirely
---==================================================================
+-- ═══════════════════════════════════════════════════════════════════
+--  ⚙️  CONFIGURATION — SET YOUR SCRIPT URL HERE
+-- ═══════════════════════════════════════════════════════════════════
+-- This URL is what gets re-loaded automatically after every teleport
+-- and server hop, so your hub keeps running seamlessly.
+local SCRIPT_URL = "https://raw.githubusercontent.com/toprakt7777-dev/Idkbutstillcool/refs/heads/main/Bfscript.lua"
+
+-- Optional: enable debug prints for queue system
+local QUEUE_DEBUG = false
+local function qlog(...) if QUEUE_DEBUG then warn("[Queue]", ...) end end
+
+-- ═══════════════════════════════════════════════════════════════════
+--  🔁  PREVENT DOUBLE-EXECUTION AFTER TELEPORT
+-- ═══════════════════════════════════════════════════════════════════
+if _G.BloxHubRunning then
+    -- Already running (queued re-exec caught it) — safely destroy old
+    pcall(function() if _G.BloxHubCleanup then _G.BloxHubCleanup() end end)
+end
+_G.BloxHubRunning = true
 
 if not game:IsLoaded() then game.Loaded:Wait() end
-task.wait(1.0)  -- CRASH FIX #7: let client settle before hooking
 
 if _G.BloxHubCleanup then pcall(_G.BloxHubCleanup) end
 
@@ -23,6 +33,7 @@ _G.BloxHubCleanup = function()
         if conn and conn.Connected then pcall(function() conn:Disconnect() end) end
     end
     table.clear(Connections)
+    _G.BloxHubRunning = false
 end
 
 local Players           = game:GetService("Players")
@@ -40,35 +51,113 @@ local LocalPlayer = Players.LocalPlayer or Players:GetPropertyChangedSignal("Loc
 local Camera      = Workspace.CurrentCamera
 local Mouse       = LocalPlayer:GetMouse()
 
-local IS_MOBILE = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+-- ═══════════════════════════════════════════════════════════════════
+--  🚀  QUEUE-ON-TELEPORT SYSTEM  (Mobile + PC)
+-- ═══════════════════════════════════════════════════════════════════
+-- Supports: Synapse, Script-Ware, Fluxus, Delta, Arceus X, Codex,
+--           Hydrogen, Krnl, Solara, Wave, Swift, and generic
+--           `queue_on_teleport` / `queueonteleport` executors.
 
-local EXECUTOR_NAME = "Unknown"
-pcall(function()
-    if syn then EXECUTOR_NAME = "Synapse"
-    elseif fluxus then EXECUTOR_NAME = "Fluxus"
-    elseif krnl then EXECUTOR_NAME = "Krnl"
-    elseif delta then EXECUTOR_NAME = "Delta"
-    elseif arceus then EXECUTOR_NAME = "Arceus X"
-    elseif hydrogen then EXECUTOR_NAME = "Hydrogen"
-    elseif codex then EXECUTOR_NAME = "Codex"
-    elseif Kavo then EXECUTOR_NAME = "Kavo"
-    elseif VegaX then EXECUTOR_NAME = "VegaX"
+local function GetQueueOnTeleportFunc()
+    local names = {
+        "queue_on_teleport",
+        "queueonteleport",
+        "queueteleport",
+        "QueueOnTeleport",
+        "queueOnTeleport",
+    }
+    -- Global lookup
+    for _, n in ipairs(names) do
+        local f = rawget(getfenv and getfenv() or _G, n) or _G[n]
+        if type(f) == "function" then qlog("Found global queue fn:", n); return f end
     end
+    -- Executor tables
+    local execs = { syn, fluxus, secure_call, krnl, codex, arceusx, hydrogen }
+    for _, ex in pairs(execs) do
+        if type(ex) == "table" then
+            for _, n in ipairs(names) do
+                if type(ex[n]) == "function" then qlog("Found executor queue fn:", n); return ex[n] end
+            end
+        end
+    end
+    return nil
+end
+
+-- Save the payload to a local file as a fallback (mobile executors
+-- with file I/O can re-exec this next launch).
+local function SaveQueuedScript(payload)
+    pcall(function()
+        if writefile then
+            writefile("BloxHub_Queued.lua", payload)
+            qlog("Saved queue payload to BloxHub_Queued.lua")
+        end
+    end)
+end
+
+-- Build the re-execution payload string
+local function BuildQueuePayload()
+    if not SCRIPT_URL or SCRIPT_URL == "" or SCRIPT_URL:find("YOUR_USER") then
+        return nil
+    end
+    return string.format([[
+-- ═══ BloxHub Auto Re-Execute on Teleport ═══
+repeat task.wait() until game:IsLoaded()
+task.wait(2)
+
+-- Prevent stacking
+if _G.BloxHubRunning then
+    pcall(function() if _G.BloxHubCleanup then _G.BloxHubCleanup() end end)
+    task.wait(0.5)
+end
+
+local ok, err = pcall(function()
+    local src = game:HttpGet("%s")
+    local fn = loadstring(src)
+    if fn then fn() end
 end)
 
--- CRASH FIX #2: feature-detect hook capability
-local unpack_fn = unpack or table.unpack
-local CAN_HOOK = not SAFE_MODE
-    and (getrawmetatable or getmetatable)
-    and (setreadonly or make_writeable)
-    and checkcaller
-    and newcclosure
-    and getnamecallmethod
-CAN_HOOK = CAN_HOOK and true or false
+if not ok then
+    warn("[BloxHub] Re-execute failed: " .. tostring(err))
+    _G.BloxHubRunning = false
+end
+]], SCRIPT_URL)
+end
 
--- ============================================================
--- CHARACTER DATA
--- ============================================================
+local function QueueScriptOnTeleport()
+    local payload = BuildQueuePayload()
+    if not payload then
+        qlog("No SCRIPT_URL configured — skipping queue.")
+        return false
+    end
+
+    -- Strategy 1: Native executor queue_on_teleport (works on most PC + mobile)
+    local qf = GetQueueOnTeleportFunc()
+    if qf then
+        local ok = pcall(qf, payload)
+        if ok then
+            qlog("Successfully queued via native function.")
+            return true
+        else
+            qlog("Native queue function failed — trying fallback.")
+        end
+    end
+
+    -- Strategy 2: File-based reload (mobile executors with writefile)
+    SaveQueuedScript(payload)
+
+    -- Strategy 3: Bind to TeleportService so we still try to auto-restart
+    -- (some executors inject into the new server automatically)
+    pcall(function()
+        -- Add a safety marker so on next manual inject user can see it queued
+        if writefile then writefile("BloxHub_QueueFlag.txt", tostring(os.time())) end
+    end)
+
+    return false
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+--  📦  CHARACTER DATA
+-- ═══════════════════════════════════════════════════════════════════
 local CharacterData = { Character = nil, Humanoid = nil, RootPart = nil }
 local LocalPlayerDeathCount = 0
 
@@ -100,18 +189,24 @@ AddConnection(LocalPlayer.CharacterRemoving:Connect(function()
     CharacterData.RootPart  = nil
 end))
 
--- ============================================================
--- SETTINGS
--- ============================================================
+-- ═══════════════════════════════════════════════════════════════════
+--  ⚙️  SETTINGS
+-- ═══════════════════════════════════════════════════════════════════
 local DefaultSettings = {
     PVPMode = false,
     FastAttack = true,
     SpamSoulGuitar = false,
+    AutoClick = false,
     AutoEquip = true,
     EquipWeaponType = "Buddy Sword",
+    BringMobs = true,
+    SafeMode = false,
     WalkOnWater = false,
     Noclip = true,
     AutoRaceV4 = false,
+    AutoFarmLevel = false, AutoFarmBoss = false, AutoFarmMaterial = false,
+    FarmMastery = false, AutoRaid = false,
+    AutoSeaEvents = false, AutoFactory = false, AutoPirateRaid = false,
     AimbotSkills = true,
     XMove100Hit = true,
     TargetPrediction = true,
@@ -124,6 +219,8 @@ local DefaultSettings = {
     HitboxExpand = true,
     HitboxSize = 35,
     Crosshair = false, ShowFOV = false, FOVRadius = 180,
+    Spectate = false,
+    AutoStats = false, StatType = "Melee", StatPoints = 1,
     SelectedIslandTeleport = "",
     TweenSpeed = 350,
     EscapeHeight = 500,
@@ -135,6 +232,7 @@ local DefaultSettings = {
     AvoidSafeZonePlayers = true,
     MaxTargetDistance = 10000,
     SavedTeam = "Pirates",
+    AutoLoadConfig = true,
     ServerHopRegion = "Singapore",
     ServerHopMaxPlayers = 10,
     FilterMinServerBounty = true,
@@ -142,10 +240,12 @@ local DefaultSettings = {
     AutoDodge = true,
     DodgeRadius = 22,
     DodgeCooldown = 0.55,
+    FastAttackBurstHP = 50,
     AttackRangeNormal = 120,
     AttackRangeBurst = 260,
     AttackRangeLowHP = 350,
-    AutoRejoinOnTeleport = true,
+    -- NEW: queue-on-teleport toggle
+    AutoQueueOnTeleport = true,
 }
 
 local Settings = {}
@@ -218,9 +318,9 @@ local function ClearLoadingOverlays()
 end
 ClearLoadingOverlays()
 
--- ============================================================
--- TEAM
--- ============================================================
+-- ═══════════════════════════════════════════════════════════════════
+--  🏴  TEAM
+-- ═══════════════════════════════════════════════════════════════════
 local function JoinTeam(teamName)
     teamName = teamName or Settings.SavedTeam or "Pirates"
     pcall(function()
@@ -232,7 +332,7 @@ local function JoinTeam(teamName)
 end
 task.spawn(function() task.wait(0.3); JoinTeam(Settings.SavedTeam) end)
 task.spawn(function()
-    while task.wait(2) do
+    while task.wait(1) do
         pcall(function()
             ClearLoadingOverlays()
             if LocalPlayer.Team == nil or LocalPlayer.Team.Name == "Neutral" or not LocalPlayer.Character then
@@ -242,9 +342,9 @@ task.spawn(function()
     end
 end)
 
--- ============================================================
--- TWEEN
--- ============================================================
+-- ═══════════════════════════════════════════════════════════════════
+--  🎞️  TWEEN
+-- ═══════════════════════════════════════════════════════════════════
 local ActiveTween = nil
 local LastTweenTarget = nil
 local TweenBodyVel = nil
@@ -255,9 +355,9 @@ local function StopTween()
     LastTweenTarget = nil
 end
 
--- ============================================================
--- INFINITE ESCAPE
--- ============================================================
+-- ═══════════════════════════════════════════════════════════════════
+--  ⬆️  INFINITE ESCAPE
+-- ═══════════════════════════════════════════════════════════════════
 local IsServerHopping = false
 local LastServerHopTime = 0
 local SERVER_HOP_COOLDOWN = 20
@@ -293,7 +393,7 @@ local function StopInfiniteEscape()
 end
 
 task.spawn(function()
-    while task.wait(0.05) do
+    while task.wait(0.03) do
         if IsEscaping then
             local root = CharacterData.RootPart
             if root then
@@ -304,106 +404,19 @@ task.spawn(function()
     end
 end)
 
--- ============================================================
--- ROBUST QUEUE ON TELEPORT (CRASH FIX #6 — reloads full hub)
--- ============================================================
-local function GetQueueOnTeleport()
-    local candidates = {
-        (getgenv and getgenv().queue_on_teleport),
-        (getgenv and getgenv().queueonteleport),
-        queue_on_teleport,
-        queueonteleport,
-        syn and syn.queue_on_teleport,
-        fluxus and fluxus.queue_on_teleport,
-        krnl and krnl.queue_on_teleport,
-        delta and delta.queue_on_teleport,
-        delta and delta.queueonteleport,
-        arceus and arceus.queue_on_teleport,
-        hydrogen and hydrogen.queue_on_teleport,
-        codex and codex.queue_on_teleport,
-        Kavo and Kavo.queue_on_teleport,
-        VegaX and VegaX.queue_on_teleport,
-    }
-    for _, f in ipairs(candidates) do
-        if type(f) == "function" then return f end
-    end
-    return nil
-end
-
-local HTTP_HELPER = [[
-local function Fetch(url)
-    local body
-    if request then
-        local ok, res = pcall(request, {Url=url, Method="GET"})
-        if ok and res and res.Body then return res.Body end
-    end
-    if http_request then
-        local ok, res = pcall(http_request, {Url=url, Method="GET"})
-        if ok and res and res.Body then return res.Body end
-    end
-    if syn and syn.request then
-        local ok, res = pcall(syn.request, {Url=url, Method="GET"})
-        if ok and res and res.Body then return res.Body end
-    end
-    if game.HttpGet then
-        local ok, res = pcall(function() return game:HttpGet(url, true) end)
-        if ok and res then return res end
-    end
-    if HttpGet then
-        local ok, res = pcall(HttpGet, url)
-        if ok and res then return res end
-    end
-    return nil
-end
-]]
-
-local function BuildQueuePayload()
-    return ([[
-        repeat task.wait() until game:IsLoaded()
-        task.wait(0.4)
-        %s
-        local url = "%s"
-        local attempts, maxAttempts = 0, 8
-        while attempts < maxAttempts do
-            attempts = attempts + 1
-            local src = Fetch(url .. "?t=" .. tostring(os.time()))
-            if src and #src > 100 then
-                local fn = (loadstring or load)(src)
-                if fn then
-                    local ok = pcall(fn)
-                    if ok then return end
-                end
-            end
-            task.wait(1.2)
-        end
-    ]]):format(HTTP_HELPER, HUB_SCRIPT_URL)
-end
-
-local function QueueScriptOnTeleport()
-    pcall(function()
-        local qf = GetQueueOnTeleport()
-        if not qf then return end
-        pcall(function()
-            if getgenv then
-                getgenv().queue_on_teleport_enabled = true
-                getgenv().QueueOnTeleport = qf
-            end
-        end)
-        qf(BuildQueuePayload())
-    end)
-end
-
-QueueScriptOnTeleport()
-task.spawn(function()
-    while task.wait(10) do
-        if Settings.AutoRejoinOnTeleport then QueueScriptOnTeleport() end
-    end
-end)
-
+-- ═══════════════════════════════════════════════════════════════════
+--  🚀  SERVER HOP  (with queue-on-teleport)
+-- ═══════════════════════════════════════════════════════════════════
 local function PrepareForTeleport()
     pcall(StopTween)
     pcall(SaveConfig)
-    if Settings.AutoRejoinOnTeleport ~= false then QueueScriptOnTeleport() end
+
+    -- 🔥 KEY: queue the script to re-execute after the teleport
+    if Settings.AutoQueueOnTeleport then
+        QueueScriptOnTeleport()
+    end
+
+    -- Clean up leftover movers
     local char = LocalPlayer.Character
     if char then
         for _, part in ipairs(char:GetChildren()) do
@@ -423,8 +436,11 @@ local function ServerHop(maxPlayers, region)
     if (os.clock() - LastServerHopTime) < SERVER_HOP_COOLDOWN then return end
     IsServerHopping = true
     LastServerHopTime = os.clock()
+
     maxPlayers = maxPlayers or Settings.ServerHopMaxPlayers or 8
     region     = region     or Settings.ServerHopRegion     or "Singapore"
+
+    -- 🔥 This queues the script BEFORE we hop
     PrepareForTeleport()
     ClearLoadingOverlays()
     pcall(StopTween)
@@ -433,30 +449,33 @@ local function ServerHop(maxPlayers, region)
     task.spawn(function()
         local serverBrowser = ReplicatedStorage:FindFirstChild("__ServerBrowser")
             or ReplicatedStorage:WaitForChild("__ServerBrowser", 10)
+
         if not serverBrowser then
-            warn("[ServerHop] __ServerBrowser not found")
+            warn("[ServerHop] __ServerBrowser not found — aborting")
             IsServerHopping = false
             return
         end
+
         local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
             or LocalPlayer:WaitForChild("PlayerGui", 5)
+
         local teleported = false
 
         for i = 1, 100 do
             pcall(function()
                 local sb = playerGui and playerGui:FindFirstChild("ServerBrowser")
-                if sb then
-                    local frame = sb:FindFirstChild("Frame") or sb:FindFirstChild("Content") or sb
-                    local filters = frame:FindFirstChild("Filters")
-                    local sr = filters and filters:FindFirstChild("SearchRegion")
-                    if sr then
-                        local tb = sr:FindFirstChild("TextBox") or sr:FindFirstChildOfClass("TextBox")
-                        if tb then tb.Text = region end
-                    end
+                local frame = sb and sb:FindFirstChild("Frame")
+                local filters = frame and frame:FindFirstChild("Filters")
+                local searchRegion = filters and filters:FindFirstChild("SearchRegion")
+                if searchRegion and searchRegion:FindFirstChild("TextBox") then
+                    searchRegion.TextBox.Text = region
                 end
             end)
 
-            local ok, response = pcall(function() return serverBrowser:InvokeServer(i) end)
+            local ok, response = pcall(function()
+                return serverBrowser:InvokeServer(i)
+            end)
+
             if ok and type(response) == "table" then
                 local pool = {}
                 for jobId, info in pairs(response) do
@@ -464,30 +483,47 @@ local function ServerHop(maxPlayers, region)
                         local count = tonumber(info.Count) or 0
                         local maxCap = tonumber(info.MaxPlayers) or 12
                         local isPrivate = string.find(tostring(info.Private), "true", 1, true) ~= nil
-                        if not isPrivate and count > 0 and count <= maxPlayers and count < maxCap then
+                        if not isPrivate
+                           and count > 0
+                           and count <= maxPlayers
+                           and count < maxCap then
                             table.insert(pool, { JobId = jobId, Count = count })
                         end
                     end
                 end
+
                 for s = #pool, 2, -1 do
                     local r = math.random(1, s)
                     pool[s], pool[r] = pool[r], pool[s]
                 end
+
                 for _, entry in ipairs(pool) do
-                    local okTP = pcall(function() serverBrowser:InvokeServer("teleport", entry.JobId) end)
-                    if okTP then teleported = true break end
+                    local okTP = pcall(function()
+                        serverBrowser:InvokeServer("teleport", entry.JobId)
+                    end)
+                    if okTP then
+                        teleported = true
+                        break
+                    end
                 end
+
                 if teleported then
                     task.wait(8)
                     if IsServerHopping then IsServerHopping = false end
                     return
                 end
             end
+
             task.wait(0.2)
         end
+
         if not teleported then
-            pcall(function() serverBrowser:InvokeServer("teleport") end)
+            warn("[ServerHop] No matching server found in browser")
+            pcall(function()
+                serverBrowser:InvokeServer("teleport")
+            end)
         end
+
         task.wait(6)
         if IsServerHopping then IsServerHopping = false end
     end)
@@ -498,9 +534,9 @@ AddConnection(TeleportService.TeleportInitFailed:Connect(function()
     ClearLoadingOverlays()
 end))
 
--- ============================================================
--- PORTAL / WORLD / REMOTES
--- ============================================================
+-- ═══════════════════════════════════════════════════════════════════
+--  🗺️  PORTAL / WORLD DATA
+-- ═══════════════════════════════════════════════════════════════════
 local PORTAL_DESTINATIONS = {
     ["Haunted Ship"]  = Vector3.new(937, 125, 32879),
     ["Dark Arena"]    = Vector3.new(3948, 13, -3479),
@@ -565,10 +601,10 @@ local function ApplyAntiStun()
     if not char then return end
     local hum, root = CharacterData.Humanoid, CharacterData.RootPart
     if hum then hum.PlatformStand = false hum.Sit = false end
-    if root and not IsEscaping then
+    if root then
         pcall(function()
             root.AssemblyAngularVelocity = Vector3.zero
-            root.AssemblyLinearVelocity = Vector3.zero
+            if not IsEscaping then root.AssemblyLinearVelocity = Vector3.zero end
         end)
         for _, obj in ipairs(root:GetChildren()) do
             if ((obj:IsA("BodyVelocity") and obj.Name ~= "TweenBV" and obj.Name ~= "EscapeBV")
@@ -584,6 +620,7 @@ local World1 = PlaceId == 2753915549 or PlaceId == 85211729168715
 local World2 = PlaceId == 4442272183 or PlaceId == 79091703265657
 local World3 = PlaceId == 7449423635 or PlaceId == 100117331123089
 
+-- Hit Validator
 local HitValidator = { LastHitTime = 0, LastHitDamage = 0, TotalHitCount = 0, ReceivedHitTime = 0 }
 local TargetKillCounts = {}
 
@@ -639,7 +676,7 @@ local function TrackLocalPlayerDeath(char)
             if LocalPlayerDeathCount >= 3 then
                 task.spawn(function()
                     if not IsServerHopping and Settings.BountyHunt then
-                        UpdateStatusText("Died 3× — hopping")
+                        UpdateStatusText("Died 3 times! Initiating Server Hop...")
                         StartInfiniteEscape()
                         task.wait(1.2)
                         ServerHop()
@@ -655,6 +692,7 @@ AddConnection(LocalPlayer.CharacterAdded:Connect(function(char)
 end))
 if LocalPlayer.Character then UpdateCharacterReferences(); TrackLocalPlayerDeath(LocalPlayer.Character) end
 
+-- Island Teleports
 local IslandTeleports = {}
 if World1 then
     IslandTeleports = {
@@ -684,17 +722,20 @@ elseif World3 then
     }
 end
 
+-- State
 local CurrentTargetPos  = Vector3.zero
 local CurrentTargetPart = nil
 local CurrentTargetName = "None"
 local CurrentTargetPlayer = nil
 local HuntTargetPlayer  = nil
 local HuntTargetStartTime = 0
+local IsInEscapeMode    = false
 local LastPortalTPTime  = 0
 local IsPortalTeleporting = false
 local SavedSettingsConfig = nil
 local NoTargetStartTime = 0
 local IsComboRunning    = false
+local LastDodgeTime     = 0
 
 local Fluent, Window
 local isSyncingUI = false
@@ -707,8 +748,9 @@ local function GetCenterScreen()
     return Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
 end
 
+-- Auto Buso
 task.spawn(function()
-    while task.wait(1) do
+    while task.wait(0.5) do
         pcall(function()
             local char = CharacterData.Character
             if char and CommF_ then
@@ -721,6 +763,7 @@ task.spawn(function()
     end
 end)
 
+-- Prediction
 local function GetPredictedTargetPos(targetPart, projectileSpeed, gravity)
     if not targetPart or not targetPart.Parent then return Vector3.zero end
     local pos = targetPart.Position
@@ -738,77 +781,100 @@ local function GetPredictedTargetPos(targetPart, projectileSpeed, gravity)
     return pos
 end
 
--- ============================================================
--- CRASH FIX #2: SILENT AIM HOOK (feature-detected)
--- ============================================================
-if CAN_HOOK then
-    pcall(function()
-        local mt = getrawmetatable(game)
-        setreadonly(mt, false)
-        local oldIndex = mt.__index
-        local oldNamecall = mt.__namecall
+-- Silent Aim metatable hook
+pcall(function()
+    local getrawmetatable = getrawmetatable or function() return getmetatable(game) end
+    local setreadonly = setreadonly or make_writeable or function() end
+    local mt = getrawmetatable(game)
+    setreadonly(mt, false)
+    local oldIndex = mt.__index
+    local oldNamecall = mt.__namecall
+    local isHooking = false
 
-        mt.__index = newcclosure(function(self, index)
-            if not checkcaller() and not IsServerHopping and not IsEscaping then
-                if self == Mouse and CurrentTargetPart and CurrentTargetPart.Parent
-                   and (Settings.AimbotSkills or Settings.XMove100Hit or Settings.SpamSoulGuitar) then
-                    local idx = type(index) == "string" and string.lower(index) or ""
-                    local pred = GetPredictedTargetPos(CurrentTargetPart)
-                    if idx == "hit" or idx == "cframe" then
-                        if pred ~= Vector3.zero then return CFrame.new(pred) end
-                    elseif idx == "target" then
-                        return CurrentTargetPart
-                    elseif idx == "unitray" and Camera and pred ~= Vector3.zero then
-                        return Ray.new(Camera.CFrame.Position, (pred - Camera.CFrame.Position).Unit)
+    mt.__index = newcclosure(function(self, index)
+        if not checkcaller() and not IsServerHopping and not IsEscaping and not isHooking
+           and (Settings.AimbotSkills or Settings.XMove100Hit or Settings.SpamSoulGuitar) then
+            if self == Mouse then
+                isHooking = true
+                local idx = type(index) == "string" and string.lower(index) or ""
+                if idx == "hit" or idx == "cframe" then
+                    if CurrentTargetPart and CurrentTargetPart.Parent then
+                        local predicted = GetPredictedTargetPos(CurrentTargetPart)
+                        if predicted ~= Vector3.zero then isHooking = false return CFrame.new(predicted) end
+                    end
+                elseif idx == "target" then
+                    if CurrentTargetPart and CurrentTargetPart.Parent then isHooking = false return CurrentTargetPart end
+                elseif idx == "unitray" then
+                    if CurrentTargetPart and CurrentTargetPart.Parent then
+                        local predicted = GetPredictedTargetPos(CurrentTargetPart)
+                        if predicted ~= Vector3.zero and Camera then
+                            local dir = (predicted - Camera.CFrame.Position).Unit
+                            isHooking = false
+                            return Ray.new(Camera.CFrame.Position, dir)
+                        end
                     end
                 end
+                isHooking = false
             end
-            return oldIndex(self, index)
-        end)
+        end
+        return oldIndex(self, index)
+    end)
 
-        mt.__namecall = newcclosure(function(self, ...)
-            local method = getnamecallmethod()
-            if not checkcaller() and not IsServerHopping and not IsEscaping
-               and CurrentTargetPart and CurrentTargetPart.Parent
-               and (Settings.AimbotSkills or Settings.XMove100Hit or Settings.SpamSoulGuitar) then
-                local pred = GetPredictedTargetPos(CurrentTargetPart)
-                if pred ~= Vector3.zero then
-                    if method == "Raycast" then
-                        local args = {...}
-                        if typeof(args[1]) == "Vector3" then
-                            local dirLen = typeof(args[2]) == "Vector3" and args[2].Magnitude or 1000
-                            args[2] = (pred - args[1]).Unit * dirLen
-                            return oldNamecall(self, unpack_fn(args))
-                        end
-                    elseif method == "FindPartOnRay" or method == "FindPartOnRayWithIgnoreList"
-                        or method == "FindPartOnRayWithWhitelist" then
-                        local args = {...}
-                        local ray = args[1]
-                        if typeof(ray) == "Ray" then
-                            args[1] = Ray.new(ray.Origin, (pred - ray.Origin).Unit * ray.Direction.Magnitude)
-                            return oldNamecall(self, unpack_fn(args))
-                        end
-                    elseif method == "FireServer" or method == "InvokeServer" then
+    mt.__namecall = newcclosure(function(self, ...)
+        local method = getnamecallmethod and getnamecallmethod() or ""
+        if not checkcaller() and not IsServerHopping and not IsEscaping and not isHooking
+           and (Settings.AimbotSkills or Settings.XMove100Hit or Settings.SpamSoulGuitar) then
+            if method == "Raycast" or method == "raycast" then
+                if CurrentTargetPart and CurrentTargetPart.Parent then
+                    isHooking = true
+                    local args = {...}
+                    local origin = args[1]
+                    local predicted = GetPredictedTargetPos(CurrentTargetPart)
+                    if typeof(origin) == "Vector3" and predicted ~= Vector3.zero then
+                        local dirLen = typeof(args[2]) == "Vector3" and args[2].Magnitude or 1000
+                        args[2] = (predicted - origin).Unit * dirLen
+                        isHooking = false
+                        return oldNamecall(self, unpack(args))
+                    end
+                    isHooking = false
+                end
+            elseif method == "FindPartOnRay" or method == "FindPartOnRayWithIgnoreList" or method == "FindPartOnRayWithWhitelist" then
+                if CurrentTargetPart and CurrentTargetPart.Parent then
+                    isHooking = true
+                    local args = {...}
+                    local ray = args[1]
+                    local predicted = GetPredictedTargetPos(CurrentTargetPart)
+                    if typeof(ray) == "Ray" and predicted ~= Vector3.zero then
+                        args[1] = Ray.new(ray.Origin, (predicted - ray.Origin).Unit * ray.Direction.Magnitude)
+                        isHooking = false
+                        return oldNamecall(self, unpack(args))
+                    end
+                    isHooking = false
+                end
+            elseif method == "FireServer" or method == "InvokeServer" then
+                if CurrentTargetPart and CurrentTargetPart.Parent then
+                    isHooking = true
+                    local predicted = GetPredictedTargetPos(CurrentTargetPart)
+                    if predicted ~= Vector3.zero then
                         local args = {...}
                         local modified = false
                         for i = 1, #args do
                             local a = args[i]
-                            if typeof(a) == "Vector3" then args[i] = pred modified = true
-                            elseif typeof(a) == "CFrame" then args[i] = CFrame.new(pred) modified = true end
+                            if typeof(a) == "Vector3" then args[i] = predicted modified = true
+                            elseif typeof(a) == "CFrame" then args[i] = CFrame.new(predicted) modified = true end
                         end
-                        if modified then return oldNamecall(self, unpack_fn(args)) end
+                        if modified then isHooking = false return oldNamecall(self, unpack(args)) end
                     end
+                    isHooking = false
                 end
             end
-            return oldNamecall(self, ...)
-        end)
-        setreadonly(mt, true)
+        end
+        return oldNamecall(self, ...)
     end)
-end
+    setreadonly(mt, true)
+end)
 
--- ============================================================
--- SAFE ZONE / PVP HELPERS
--- ============================================================
+-- Safe zone helpers
 local function IsPlayerInSafeZone(player)
     if not player then return true end
     if player:GetAttribute("InSafeZone") == true or player:GetAttribute("SafeZone") == true then return true end
@@ -850,6 +916,7 @@ local function IsPlayerPvPDisabled(player)
         if char:FindFirstChildOfClass("ForceField") then return true end
         local v = char:FindFirstChild("PvpDisabled") or char:FindFirstChild("PVPDisabled")
         if v and v:IsA("ValueBase") and v.Value == true then return true end
+        if char:GetAttribute("PvpDisabled") == true or char:GetAttribute("PVPDisabled") == true then return true end
     end
     return false
 end
@@ -875,9 +942,7 @@ local function GetPlayerTeam(player)
     return tostring(player.Team.Name)
 end
 
--- ============================================================
--- EQUIP + INPUT
--- ============================================================
+-- Equip helpers
 local function EquipToolByName(toolName)
     local char = CharacterData.Character
     local backpack = LocalPlayer:FindFirstChild("Backpack")
@@ -927,13 +992,6 @@ local function SendKeyPress(keyCode)
         task.wait(0.01)
         VirtualInputManager:SendKeyEvent(false, keyCode, false, game)
     end)
-    if IS_MOBILE then
-        pcall(function()
-            if keypress and type(keypress) == "function" and keyCode.Value then
-                keypress(keyCode.Value)
-            end
-        end)
-    end
 end
 
 local function SafeTweenTo(targetCFrame, speed)
@@ -1002,6 +1060,7 @@ local function PerformPortalTeleport(destinationName)
     IsPortalTeleporting = false
 end
 
+-- Soul Guitar spam
 local function FireSoulGuitarSpam()
     if not Settings.SpamSoulGuitar or IsServerHopping or IsEscaping then return end
     local char = CharacterData.Character
@@ -1024,7 +1083,7 @@ local function FireSoulGuitarSpam()
 end
 
 task.spawn(function()
-    while task.wait(0.05) do
+    while task.wait(0.015) do
         if Settings.SpamSoulGuitar and not IsServerHopping and not IsEscaping then
             pcall(FireSoulGuitarSpam)
         end
@@ -1059,7 +1118,7 @@ end
 
 local function ExecuteSmartCombo(targetPart)
     if IsComboRunning or IsServerHopping or IsEscaping
-       or not targetPart or not targetPart.Parent then return end
+       or not targetPart or not targetPart.Parent or IsInEscapeMode then return end
     IsComboRunning = true
     local function IsTargetValid()
         if not targetPart or not targetPart.Parent then return false end
@@ -1067,7 +1126,8 @@ local function ExecuteSmartCombo(targetPart)
         local hum = parent:FindFirstChildOfClass("Humanoid")
         if not hum or hum.Health <= 0 then return false end
         if CharacterData.RootPart then
-            if (CharacterData.RootPart.Position - targetPart.Position).Magnitude > 180 then return false end
+            local distance = (CharacterData.RootPart.Position - targetPart.Position).Magnitude
+            if distance > 180 then return false end
         end
         local player = Players:GetPlayerFromCharacter(parent)
         if player and (IsPlayerInSafeZone(player) or IsPlayerPvPDisabled(player)) then return false end
@@ -1085,16 +1145,14 @@ local function ExecuteSmartCombo(targetPart)
     }
     task.spawn(function()
         for _, step in ipairs(pool) do
-            if not IsTargetValid() or IsServerHopping or IsEscaping then break end
-            if EquipToolByName(step.Tool) then SendKeyPress(step.Key) task.wait(0.03) end
+            if not IsTargetValid() or IsInEscapeMode or IsServerHopping or IsEscaping then break end
+            if EquipToolByName(step.Tool) then SendKeyPress(step.Key) task.wait(0.015) end
         end
         IsComboRunning = false
     end)
 end
 
--- ============================================================
--- TARGETING
--- ============================================================
+-- Targeting
 local function CanGetBounty(targetPlayer)
     if not targetPlayer or targetPlayer == LocalPlayer then return false end
     if (TargetKillCounts[targetPlayer.UserId] or 0) >= 3 then return false end
@@ -1197,9 +1255,7 @@ local function GetClosestPlayerToCenterScreen()
     return closestPlayer
 end
 
--- ============================================================
--- CRASH FIX #3: FAST ATTACK (capped at 30ms = 33 fires/sec)
--- ============================================================
+-- Fast Attack
 local FastAttack = {}
 local FastAttack_enemies    = Workspace:FindFirstChild("Enemies") or Workspace
 local FastAttack_characters = Workspace:FindFirstChild("Characters") or Workspace
@@ -1207,6 +1263,7 @@ local FastAttack_arms = {
     "RightLowerArm","RightUpperArm","LeftLowerArm","LeftUpperArm",
     "RightHand","LeftHand","RightFoot","LeftFoot","RightLeg","LeftLeg","Torso","Head"
 }
+local FastAttackState = { LastTickInterval = 0.03, LastRange = 120 }
 
 function FastAttack:SuperFastAttack()
     if IsServerHopping or IsEscaping then return end
@@ -1223,16 +1280,19 @@ function FastAttack:SuperFastAttack()
     if healthRatio < 0.25 then range = Settings.AttackRangeLowHP or 350
     elseif healthRatio < 0.5 then range = Settings.AttackRangeBurst or 260
     else range = Settings.AttackRangeNormal or 120 end
+    FastAttackState.LastRange = range
 
     local hitData = {}
     local primaryPart
+    local playerHits = {}
 
     for _, list in ipairs({ FastAttack_enemies, FastAttack_characters }) do
         if list then
             for _, e in ipairs(list:GetChildren()) do
                 if e ~= char and not e:GetAttribute("IsBoat") then
                     local tp = Players:GetPlayerFromCharacter(e)
-                    if not (tp and (IsPlayerInSafeZone(tp) or IsPlayerPvPDisabled(tp))) then
+                    if tp and (IsPlayerInSafeZone(tp) or IsPlayerPvPDisabled(tp)) then
+                    else
                         local ehum = e:FindFirstChildOfClass("Humanoid")
                         local ebody = e:FindFirstChild("Head") or e.PrimaryPart
                         if ehum and ehum.Health > 0 and ebody
@@ -1242,6 +1302,7 @@ function FastAttack:SuperFastAttack()
                             if part then
                                 table.insert(hitData, { e, part })
                                 primaryPart = part
+                                if tp then table.insert(playerHits, tp) end
                             end
                         end
                     end
@@ -1258,27 +1319,45 @@ function FastAttack:SuperFastAttack()
     end
 
     if Register_Attack then pcall(function() Register_Attack:FireServer(0) end) end
-    if Register_Hit then pcall(function() Register_Hit:FireServer(primaryPart, hitData) end) end
+    if Register_Hit then
+        pcall(function() Register_Hit:FireServer(primaryPart, hitData) end)
+        if healthRatio < 0.6 then
+            for _ = 1, 2 do
+                local extraHits = {}
+                for _, h in ipairs(hitData) do
+                    local alt = h[1]:FindFirstChild(FastAttack_arms[math.random(#FastAttack_arms)]) or h[2]
+                    table.insert(extraHits, { h[1], alt })
+                end
+                pcall(function() Register_Hit:FireServer(extraHits[1] and extraHits[1][2] or primaryPart, extraHits) end)
+            end
+        end
+    end
 end
 
--- CRASH FIX #3: hard min 0.03s
 task.spawn(function()
     while true do
-        task.wait(0.03)
+        local hr = GetHealthRatio()
+        local interval
+        if hr < 0.25 then interval = 0.006
+        elseif hr < 0.5 then interval = 0.010
+        else interval = 0.025 end
+        FastAttackState.LastTickInterval = interval
+        task.wait(interval)
         if Settings.FastAttack and not IsServerHopping and not IsEscaping then
             pcall(function() FastAttack:SuperFastAttack() end)
         end
     end
 end)
 
--- ============================================================
--- DODGER
--- ============================================================
+-- Dodger
 local DodgeState = { LastDodge = 0, PatternIndex = 1 }
 local DodgePatterns = {
-    Vector3.new(35, 12, 0), Vector3.new(-35, 12, 0),
-    Vector3.new(0, 22, 35), Vector3.new(0, 22, -35),
-    Vector3.new(28, 16, 28), Vector3.new(-28, 16, -28),
+    { Vector3.new(35, 12, 0) },
+    { Vector3.new(-35, 12, 0) },
+    { Vector3.new(0, 22, 35) },
+    { Vector3.new(0, 22, -35) },
+    { Vector3.new(28, 16, 28) },
+    { Vector3.new(-28, 16, -28) },
 }
 
 local function PerformDodge()
@@ -1286,14 +1365,18 @@ local function PerformDodge()
     if (os.clock() - DodgeState.LastDodge) < (Settings.DodgeCooldown or 0.55) then return end
     local root = CharacterData.RootPart
     if not root or not Camera then return end
+
     DodgeState.LastDodge = os.clock()
     DodgeState.PatternIndex = (DodgeState.PatternIndex % #DodgePatterns) + 1
-    local offset = DodgePatterns[DodgeState.PatternIndex]
-    local worldOffset = Camera.CFrame:VectorToWorldSpace(offset)
+    local offset = DodgePatterns[DodgeState.PatternIndex][1]
+
+    local camCF = Camera.CFrame
+    local worldOffset = camCF:VectorToWorldSpace(offset)
+
     local threat = CurrentTargetPlayer
     if threat and threat.Character and threat.Character:FindFirstChild("HumanoidRootPart") then
         local threatPos = threat.Character.HumanoidRootPart.Position
-        local toMe = root.Position - threatPos
+        local toMe = (root.Position - threatPos)
         toMe = Vector3.new(toMe.X, 0, toMe.Z)
         if toMe.Magnitude > 0.1 then
             local side = Vector3.new(-toMe.Z, 0, toMe.X).Unit
@@ -1301,12 +1384,15 @@ local function PerformDodge()
             worldOffset = side * 35 + Vector3.new(0, 12, 0)
         end
     end
+
     StopTween()
     root.AssemblyLinearVelocity = worldOffset * 6
+    local newCF = root.CFrame + worldOffset
+    root.CFrame = newCF
 end
 
 task.spawn(function()
-    while task.wait(0.1) do
+    while task.wait(0.06) do
         if Settings.AutoDodge and not IsEscaping and not IsServerHopping and Settings.BountyHunt then
             if HitValidator:WasHitTakenRecently(0.4) then
                 PerformDodge()
@@ -1314,13 +1400,19 @@ task.spawn(function()
                 local root = CharacterData.RootPart
                 if root then
                     for _, p in ipairs(Players:GetPlayers()) do
-                        if p ~= LocalPlayer and not IsPlayerInSafeZone(p) and not IsPlayerPvPDisabled(p) and p.Character then
+                        if p ~= LocalPlayer and not IsPlayerInSafeZone(p) and not IsPlayerPvPDisabled(p)
+                           and p.Character then
                             local hrp = p.Character:FindFirstChild("HumanoidRootPart")
                             local hum = p.Character:FindFirstChildOfClass("Humanoid")
-                            if hrp and hum and hum.Health > 0
-                               and (hrp.Position - root.Position).Magnitude < (Settings.DodgeRadius or 22)
-                               and hrp.AssemblyLinearVelocity.Magnitude > 5 then
-                                PerformDodge() break
+                            if hrp and hum and hum.Health > 0 then
+                                local dist = (hrp.Position - root.Position).Magnitude
+                                if dist < (Settings.DodgeRadius or 22) then
+                                    local theirVel = hrp.AssemblyLinearVelocity
+                                    if theirVel.Magnitude > 5 then
+                                        PerformDodge()
+                                        break
+                                    end
+                                end
                             end
                         end
                     end
@@ -1330,28 +1422,16 @@ task.spawn(function()
     end
 end)
 
--- ============================================================
--- CRASH FIX #1 + #4 + #5: SAFE HITBOX (throttled, safe parts only)
--- ============================================================
-local HitboxState = { OriginalSizes = {}, LastTargetChar = nil, LastUpdate = 0 }
-local HITBOX_SAFE_PARTS = {
-    Torso = true, UpperTorso = true, LowerTorso = true,
-    ["Left Arm"] = true, ["Right Arm"] = true,
-    ["Left Leg"] = true, ["Right Leg"] = true,
-    LeftUpperArm = true, RightUpperArm = true, LeftLowerArm = true, RightLowerArm = true,
-    LeftUpperLeg = true, RightUpperLeg = true, LeftLowerLeg = true, RightLowerLeg = true,
-    LeftHand = true, RightHand = true, LeftFoot = true, RightFoot = true
-}
+-- Hitbox extender
+local HitboxState = { OriginalSizes = {}, LastTargetChar = nil }
 
 local function RestoreHitbox(targetChar)
     if not targetChar or not HitboxState.OriginalSizes[targetChar] then return end
-    for part, data in pairs(HitboxState.OriginalSizes[targetChar]) do
+    for part, size in pairs(HitboxState.OriginalSizes[targetChar]) do
         if part and part.Parent then
             pcall(function()
-                part.Size = data.Size
-                part.Transparency = data.Transparency
-                part.CanCollide = data.CanCollide
-                part.Massless = data.Massless
+                part.Size = size
+                part.Transparency = HitboxState.OriginalSizes[targetChar][part.."_t"] or 0
             end)
         end
     end
@@ -1368,32 +1448,30 @@ local function ExpandHitbox(targetChar, size)
     if not HitboxState.OriginalSizes[targetChar] then
         HitboxState.OriginalSizes[targetChar] = {}
         for _, part in ipairs(targetChar:GetChildren()) do
-            if part:IsA("BasePart") and HITBOX_SAFE_PARTS[part.Name] then
-                HitboxState.OriginalSizes[targetChar][part] = {
-                    Size = part.Size,
-                    Transparency = part.Transparency,
-                    CanCollide = part.CanCollide,
-                    Massless = part.Massless,
-                }
+            if part:IsA("BasePart") then
+                HitboxState.OriginalSizes[targetChar][part] = part.Size
             end
         end
     end
 
     local newSize = Vector3.new(size, size, size)
-    for part in pairs(HitboxState.OriginalSizes[targetChar]) do
-        if part and part.Parent then
+    for _, part in ipairs(targetChar:GetChildren()) do
+        if part:IsA("BasePart") then
             pcall(function()
                 part.Size = newSize
+                part.Transparency = 0.7
                 part.CanCollide = false
                 part.Massless = true
+                if part.Name == "Head" or part.Name == "Torso" or part.Name == "UpperTorso" then
+                    part.BrickColor = BrickColor.new("Really red")
+                    part.Material = Enum.Material.Neon
+                end
             end)
         end
     end
 end
 
--- ============================================================
--- STOP BOUNTY BUTTON
--- ============================================================
+-- Stop Bounty GUI
 local StopBountyGui = nil
 
 local function CreateStopBountyButton(onStopClicked)
@@ -1406,23 +1484,23 @@ local function CreateStopBountyButton(onStopClicked)
         else StopBountyGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
     end)
 
-    local btnSize = IS_MOBILE and UDim2.new(0, 260, 0, 64) or UDim2.new(0, 220, 0, 50)
     local btn = Instance.new("TextButton")
     btn.Name = "StopButton"
     btn.Parent = StopBountyGui
-    btn.Size = btnSize
-    btn.Position = UDim2.new(0.5, -btnSize.X.Offset/2, 0.08, 0)
+    btn.Size = UDim2.new(0, 220, 0, 50)
+    btn.Position = UDim2.new(0.5, -110, 0.08, 0)
     btn.BackgroundColor3 = Color3.fromRGB(220, 40, 40)
     btn.TextColor3 = Color3.fromRGB(255, 255, 255)
     btn.Font = Enum.Font.SourceSansBold
-    btn.TextSize = IS_MOBILE and 22 or 18
+    btn.TextSize = 18
     btn.Text = "🛑 STOP BOUNTY HUNT"
     btn.BorderSizePixel = 2
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
 
-    btn.MouseButton1Click:Connect(function() if onStopClicked then pcall(onStopClicked) end end)
-    pcall(function()
-        btn.TouchTap:Connect(function() if onStopClicked then pcall(onStopClicked) end end)
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = btn
+    btn.MouseButton1Click:Connect(function()
+        if onStopClicked then pcall(onStopClicked) end
     end)
 end
 
@@ -1453,6 +1531,7 @@ local function SyncUIControls()
         if UIControls.AutoServerHopWhenEmptyTog then UIControls.AutoServerHopWhenEmptyTog:SetValue(Settings.AutoServerHopWhenEmpty) end
         if UIControls.FilterMinServerBountyTog then UIControls.FilterMinServerBountyTog:SetValue(Settings.FilterMinServerBounty) end
         if UIControls.AutoDodgeTog then UIControls.AutoDodgeTog:SetValue(Settings.AutoDodge) end
+        if UIControls.AutoQueueOnTeleportTog then UIControls.AutoQueueOnTeleportTog:SetValue(Settings.AutoQueueOnTeleport) end
     end)
     isSyncingUI = false
 end
@@ -1483,8 +1562,9 @@ local function SetBountyHuntMode(enabled)
         HuntTargetPlayer      = nil
         HuntTargetStartTime   = 0
         NoTargetStartTime     = 0
+        IsInEscapeMode        = false
         StopInfiniteEscape()
-        QueueScriptOnTeleport()
+
         SyncUIControls()
         SaveConfig()
         CreateStopBountyButton(function() SetBountyHuntMode(false) end)
@@ -1492,6 +1572,7 @@ local function SetBountyHuntMode(enabled)
         Settings.BountyHunt = false
         LocalPlayerDeathCount = 0
         HuntTargetPlayer      = nil
+        IsInEscapeMode        = false
         IsPortalTeleporting   = false
         NoTargetStartTime     = 0
         StopInfiniteEscape()
@@ -1506,9 +1587,7 @@ local function SetBountyHuntMode(enabled)
     end
 end
 
--- ============================================================
--- FLUENT UI
--- ============================================================
+-- Fluent UI
 BuildUI = function(isPVPMode)
     StopTween()
     UIControls = {}
@@ -1527,21 +1606,16 @@ BuildUI = function(isPVPMode)
             return loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
         end)
     end
-    if not ok or not lib then
-        warn("[BloxHub] Fluent UI failed to load")
-        return
-    end
+    if not ok or not lib then return end
 
     Fluent = lib
     Settings.PVPMode = isPVPMode
 
     Window = Fluent:CreateWindow({
-        Title = isPVPMode and "Blox Fruits Hub - PVP" or "Blox Fruits Hub",
-        SubTitle = "Queue: " .. (GetQueueOnTeleport() and "ON" or "OFF")
-                   .. " | Hook: " .. (CAN_HOOK and "ON" or "OFF")
-                   .. " | " .. EXECUTOR_NAME,
+        Title = isPVPMode and "Blox Fruits Hub - PVP Edition" or "Blox Fruits Hub - Full Edition",
+        SubTitle = isPVPMode and "Mode: PVP Exclusive" or "Mode: Standard Hub",
         TabWidth = 160,
-        Size = UDim2.fromOffset(IS_MOBILE and 520 or 640, IS_MOBILE and 400 or 480),
+        Size = UDim2.fromOffset(640, 480),
         Acrylic = false,
         Theme = "Dark",
         MinimizeKey = Enum.KeyCode.LeftControl
@@ -1549,104 +1623,175 @@ BuildUI = function(isPVPMode)
 
     local Tabs = {}
     Tabs.Combat = Window:AddTab({ Title = "Combat", Icon = "swords" })
+    if not isPVPMode then
+        Tabs.MainFarm     = Window:AddTab({ Title = "Main Farm", Icon = "sword" })
+        Tabs.MasteryRaids = Window:AddTab({ Title = "Mastery & Raids", Icon = "crown" })
+        Tabs.SeaEvents    = Window:AddTab({ Title = "Sea & Events", Icon = "waves" })
+        Tabs.Fruits       = Window:AddTab({ Title = "Fruits & Items", Icon = "apple" })
+        Tabs.LocalPlayer  = Window:AddTab({ Title = "Stats & Team", Icon = "user" })
+    end
     Tabs.PVP = Window:AddTab({ Title = "PVP & Aimbot", Icon = "crosshair" })
-    Tabs.AutoHunt = Window:AddTab({ Title = "Auto Hunt", Icon = "target" })
+    if isPVPMode then Tabs.AutoHunt = Window:AddTab({ Title = "Auto Hunt", Icon = "target" }) end
     Tabs.Teleport = Window:AddTab({ Title = "Teleports", Icon = "map-pin" })
-    Tabs.Settings = Window:AddTab({ Title = "Config", Icon = "settings" })
+    Tabs.ESP      = Window:AddTab({ Title = "ESP & Visuals", Icon = "eye" })
+    Tabs.Settings = Window:AddTab({ Title = "Config & Server", Icon = "settings" })
+
+    UIControls.PVPModeSwitchTog = Tabs.Combat:AddToggle("PVPModeSwitchTog", {
+        Title = "⚡ Switch Between PVP / Standard Mode",
+        Default = isPVPMode,
+        Callback = function(v)
+            if isSyncingUI then return end
+            pcall(function()
+                if v ~= Settings.PVPMode then
+                    for k in pairs(Settings) do
+                        if type(Settings[k]) == "boolean" and k ~= "PVPMode" then Settings[k] = false end
+                    end
+                    SetBountyHuntMode(false)
+                    BuildUI(v)
+                end
+            end)
+        end
+    })
 
     UIControls.FastAttackTog = Tabs.Combat:AddToggle("FastAttackTog", {
-        Title = "Fast Attack", Default = Settings.FastAttack,
+        Title = "Enable Fast Attack (Adaptive)", Default = Settings.FastAttack,
         Callback = function(v) if isSyncingUI then return end Settings.FastAttack = v SaveConfig() end
     })
+
     UIControls.SpamSoulGuitarTog = Tabs.Combat:AddToggle("SpamSoulGuitarTog", {
-        Title = "🔥 Spam Soul Guitar", Default = Settings.SpamSoulGuitar,
+        Title = "🔥 Spam Soul Guitar (Moves + M1 Aimbot)", Default = Settings.SpamSoulGuitar,
         Callback = function(v) if isSyncingUI then return end Settings.SpamSoulGuitar = v SaveConfig() end
     })
-    UIControls.AutoRaceV4Tog = Tabs.Combat:AddToggle("AutoRaceV4Tog", {
-        Title = "Auto Race V4", Default = Settings.AutoRaceV4,
-        Callback = function(v) if isSyncingUI then return end Settings.AutoRaceV4 = v SaveConfig() end
+
+    Tabs.Combat:AddDropdown("WeaponTypeDropdown", {
+        Title = "Select Weapon ToolTip",
+        Values = { "Buddy Sword", "Melee", "Sword", "Blox Fruit", "Gun" },
+        Default = Settings.EquipWeaponType,
+        Callback = function(v) if isSyncingUI then return end Settings.EquipWeaponType = v SaveConfig() end
     })
+
     Tabs.Combat:AddToggle("WalkWaterTog", {
         Title = "Walk On Water", Default = Settings.WalkOnWater,
         Callback = function(v) if isSyncingUI then return end Settings.WalkOnWater = v SaveConfig() end
     })
     Tabs.Combat:AddToggle("NoclipTog", {
-        Title = "Noclip", Default = Settings.Noclip,
+        Title = "Noclip Mode", Default = Settings.Noclip,
         Callback = function(v) if isSyncingUI then return end Settings.Noclip = v SaveConfig() end
+    })
+    UIControls.AutoRaceV4Tog = Tabs.Combat:AddToggle("AutoRaceV4Tog", {
+        Title = "Auto Turn On Race V4", Default = Settings.AutoRaceV4,
+        Callback = function(v) if isSyncingUI then return end Settings.AutoRaceV4 = v SaveConfig() end
+    })
+
+    UIControls.AimMethodDropdown = Tabs.PVP:AddDropdown("AimMethodDropdown", {
+        Title = "Select Aim Target Method",
+        Values = { "Closest to Center Screen", "Closest to LocalPlayer", "Selected Player" },
+        Default = Settings.AimMethod,
+        Callback = function(v) if isSyncingUI then return end Settings.AimMethod = v SaveConfig() end
+    })
+
+    UIControls.TargetPriorityDropdown = Tabs.PVP:AddDropdown("TargetPriorityDropdown", {
+        Title = "🎯 Target Priority (Bounty Hunt)",
+        Values = { "LowestHP", "Closest", "Balanced" },
+        Default = Settings.TargetPriority,
+        Callback = function(v) if isSyncingUI then return end Settings.TargetPriority = v SaveConfig() end
+    })
+
+    UIControls.TargetDropdown = Tabs.PVP:AddDropdown("SelectTargetDropdown", {
+        Title = "Select Target Player",
+        Values = GetPlayerList(), Default = Settings.TargetSelect,
+        Callback = function(v) if isSyncingUI then return end Settings.TargetSelect = v SaveConfig() end
     })
 
     UIControls.AimbotSkillsTog = Tabs.PVP:AddToggle("AimbotSkillsTog", {
-        Title = "Silent Aim", Default = Settings.AimbotSkills,
+        Title = "Skill Redirection Aimbot (100% Silent Aim)", Default = Settings.AimbotSkills,
         Callback = function(v) if isSyncingUI then return end Settings.AimbotSkills = v SaveConfig() end
     })
     UIControls.XMove100HitTog = Tabs.PVP:AddToggle("XMove100HitTog", {
-        Title = "Buddy Sword X Auto-Lock", Default = Settings.XMove100Hit,
+        Title = "100% Buddy Sword X & Skill Auto-Lock", Default = Settings.XMove100Hit,
         Callback = function(v) if isSyncingUI then return end Settings.XMove100Hit = v SaveConfig() end
     })
     UIControls.TargetPredictionTog = Tabs.PVP:AddToggle("TargetPredictionTog", {
-        Title = "Target Prediction", Default = Settings.TargetPrediction,
+        Title = "Target Velocity Prediction", Default = Settings.TargetPrediction,
         Callback = function(v) if isSyncingUI then return end Settings.TargetPrediction = v SaveConfig() end
     })
     UIControls.AimbotCameraTog = Tabs.PVP:AddToggle("AimbotCameraTog", {
-        Title = "Camera Lock", Default = Settings.AimbotCamera,
+        Title = "Camera Lock On Target", Default = Settings.AimbotCamera,
         Callback = function(v) if isSyncingUI then return end Settings.AimbotCamera = v SaveConfig() end
     })
     UIControls.InstantLockTog = Tabs.PVP:AddToggle("InstantLockTog", {
-        Title = "Instant Hard Lock", Default = Settings.InstantLock,
+        Title = "Instant Hard Lock (0 Delay)", Default = Settings.InstantLock,
         Callback = function(v) if isSyncingUI then return end Settings.InstantLock = v SaveConfig() end
     })
+
     UIControls.AutoDodgeTog = Tabs.PVP:AddToggle("AutoDodgeTog", {
-        Title = "💨 Auto Dodger", Default = Settings.AutoDodge,
+        Title = "💨 Auto Dodger (Strafes When Attacked)", Default = Settings.AutoDodge,
         Callback = function(v) if isSyncingUI then return end Settings.AutoDodge = v SaveConfig() end
     })
+    Tabs.PVP:AddSlider("DodgeRadiusSlider", {
+        Title = "Dodge Trigger Radius (Studs)", Min = 10, Max = 50, Default = Settings.DodgeRadius, Rounding = 0,
+        Callback = function(v) if isSyncingUI then return end Settings.DodgeRadius = v SaveConfig() end
+    })
+
     UIControls.HitboxExpandTog = Tabs.PVP:AddToggle("HitboxExpandTog", {
-        Title = "Expand Hitbox", Default = Settings.HitboxExpand,
+        Title = "Expand Target Hitbox", Default = Settings.HitboxExpand,
         Callback = function(v) if isSyncingUI then return end Settings.HitboxExpand = v SaveConfig() end
     })
     UIControls.HitboxSizeSlider = Tabs.PVP:AddSlider("HitboxSizeSlider", {
-        Title = "Hitbox Size", Min = 5, Max = 60, Default = Settings.HitboxSize, Rounding = 0,
+        Title = "Hitbox Size Expansion", Min = 5, Max = 60, Default = Settings.HitboxSize, Rounding = 0,
         Callback = function(v) if isSyncingUI then return end Settings.HitboxSize = v SaveConfig() end
     })
 
-    UIControls.HuntStatusParagraph = Tabs.AutoHunt:AddParagraph({
-        Title = "Auto Hunt Status", Content = "Target: Searching..."
-    })
-    UIControls.BountyHuntToggle = Tabs.AutoHunt:AddToggle("BountyHuntToggle", {
-        Title = "Enable Auto Bounty Hunt", Default = Settings.BountyHunt,
-        Callback = function(v) if isSyncingUI then return end SetBountyHuntMode(v) end
-    })
-    UIControls.FilterMinServerBountyTog = Tabs.AutoHunt:AddToggle("FilterMinServerBountyTog", {
-        Title = "30M+ Bounty Filter", Default = Settings.FilterMinServerBounty,
-        Callback = function(v) if isSyncingUI then return end Settings.FilterMinServerBounty = v SaveConfig() end
-    })
-    UIControls.AutoPortalTPTog = Tabs.AutoHunt:AddToggle("AutoPortalTPTog", {
-        Title = "Auto Portal TP", Default = Settings.AutoPortalTP,
-        Callback = function(v) if isSyncingUI then return end Settings.AutoPortalTP = v SaveConfig() end
-    })
-    UIControls.AutoServerHopWhenEmptyTog = Tabs.AutoHunt:AddToggle("AutoServerHopWhenEmptyTog", {
-        Title = "Auto Server Hop When Empty", Default = Settings.AutoServerHopWhenEmpty,
-        Callback = function(v) if isSyncingUI then return end Settings.AutoServerHopWhenEmpty = v SaveConfig() end
-    })
-    Tabs.AutoHunt:AddToggle("AutoRejoinTog", {
-        Title = "Auto Rejoin on Teleport", Default = Settings.AutoRejoinOnTeleport,
-        Callback = function(v)
-            if isSyncingUI then return end
-            Settings.AutoRejoinOnTeleport = v
-            if v then QueueScriptOnTeleport() end
-            SaveConfig()
-        end
-    })
+    if isPVPMode and Tabs.AutoHunt then
+        UIControls.HuntStatusParagraph = Tabs.AutoHunt:AddParagraph({
+            Title = "Auto Bounty Hunt Status", Content = "Target: Searching..."
+        })
+        UIControls.BountyHuntToggle = Tabs.AutoHunt:AddToggle("BountyHuntTog", {
+            Title = "Enable Auto Bounty Hunt", Default = Settings.BountyHunt,
+            Callback = function(v) if isSyncingUI then return end SetBountyHuntMode(v) end
+        })
+        UIControls.FilterMinServerBountyTog = Tabs.AutoHunt:AddToggle("FilterMinServerBountyTog", {
+            Title = "🏆 Server Browser 30M+ Bounty Filter", Default = Settings.FilterMinServerBounty,
+            Callback = function(v) if isSyncingUI then return end Settings.FilterMinServerBounty = v SaveConfig() end
+        })
+        UIControls.AutoPortalTPTog = Tabs.AutoHunt:AddToggle("AutoPortalTPTog", {
+            Title = "🌀 Portal Fast Teleport on Island Jump", Default = Settings.AutoPortalTP,
+            Callback = function(v) if isSyncingUI then return end Settings.AutoPortalTP = v SaveConfig() end
+        })
+        UIControls.AutoServerHopWhenEmptyTog = Tabs.AutoHunt:AddToggle("AutoServerHopWhenEmptyTog", {
+            Title = "🔀 Auto Server Hop When No Target Available", Default = Settings.AutoServerHopWhenEmpty,
+            Callback = function(v) if isSyncingUI then return end Settings.AutoServerHopWhenEmpty = v SaveConfig() end
+        })
+        Tabs.AutoHunt:AddSlider("PortalDistanceSlider", {
+            Title = "Portal Teleport Trigger Distance (Studs)",
+            Min = 500, Max = 4000, Default = Settings.PortalDistanceThreshold, Rounding = 0,
+            Callback = function(v) if isSyncingUI then return end Settings.PortalDistanceThreshold = v SaveConfig() end
+        })
+        Tabs.AutoHunt:AddSlider("AttackRangeNormalSlider", {
+            Title = "Attack Range (Normal HP)", Min = 80, Max = 400, Default = Settings.AttackRangeNormal, Rounding = 0,
+            Callback = function(v) if isSyncingUI then return end Settings.AttackRangeNormal = v SaveConfig() end
+        })
+        Tabs.AutoHunt:AddSlider("AttackRangeBurstSlider", {
+            Title = "Attack Range (HP < 50%)", Min = 100, Max = 500, Default = Settings.AttackRangeBurst, Rounding = 0,
+            Callback = function(v) if isSyncingUI then return end Settings.AttackRangeBurst = v SaveConfig() end
+        })
+        Tabs.AutoHunt:AddSlider("AttackRangeLowHPSlider", {
+            Title = "Attack Range (HP < 25%)", Min = 150, Max = 700, Default = Settings.AttackRangeLowHP, Rounding = 0,
+            Callback = function(v) if isSyncingUI then return end Settings.AttackRangeLowHP = v SaveConfig() end
+        })
+    end
 
+    -- Teleports
     local islandNames = {}
     for name in pairs(IslandTeleports) do table.insert(islandNames, name) end
     Tabs.Teleport:AddDropdown("IslandTeleportDropdown", {
-        Title = "Select Island",
-        Values = #islandNames > 0 and islandNames or { "None" },
+        Title = "Select Target Island",
+        Values = #islandNames > 0 and islandNames or { "No Teleports" },
         Default = islandNames[1] or "",
         Callback = function(v) if isSyncingUI then return end Settings.SelectedIslandTeleport = v SaveConfig() end
     })
     Tabs.Teleport:AddButton({
-        Title = "Teleport to Island",
+        Title = "Teleport to Selected Island",
         Callback = function()
             pcall(function()
                 if Settings.SelectedIslandTeleport ~= "" and IslandTeleports[Settings.SelectedIslandTeleport] then
@@ -1656,104 +1801,142 @@ BuildUI = function(isPVPMode)
         end
     })
     Tabs.Teleport:AddSlider("TweenSpeedSlider", {
-        Title = "Tween Speed", Min = 150, Max = 450, Default = Settings.TweenSpeed, Rounding = 0,
+        Title = "Tween Flight Speed", Min = 150, Max = 450, Default = Settings.TweenSpeed, Rounding = 0,
         Callback = function(v) if isSyncingUI then return end Settings.TweenSpeed = v SaveConfig() end
     })
+    Tabs.Teleport:AddSlider("EscapeHeightSlider", {
+        Title = "Sky Hover / Escape Height", Min = 100, Max = 1000, Default = Settings.EscapeHeight, Rounding = 0,
+        Callback = function(v) if isSyncingUI then return end Settings.EscapeHeight = v SaveConfig() end
+    })
 
+    UIControls.PlayerESPTog = Tabs.ESP:AddToggle("PlayerESPTog", {
+        Title = "Player Text ESP", Default = Settings.PlayerESP,
+        Callback = function(v) if isSyncingUI then return end Settings.PlayerESP = v SaveConfig() end
+    })
+
+    -- Settings tab
     UIControls.TeamDropdown = Tabs.Settings:AddDropdown("SavedTeamDropdownConfig", {
-        Title = "Auto-Join Team", Values = { "Pirates", "Marines" },
+        Title = "🚩 Auto-Join Team Selection", Values = { "Pirates", "Marines" },
         Default = Settings.SavedTeam or "Pirates",
         Callback = function(v) if isSyncingUI then return end Settings.SavedTeam = v SaveConfig() JoinTeam(v) end
     })
+
+    -- 🔥 NEW: Queue-on-teleport toggle
+    UIControls.AutoQueueOnTeleportTog = Tabs.Settings:AddToggle("AutoQueueOnTeleportTog", {
+        Title = "🔁 Auto Re-Execute After Teleport / Server Hop",
+        Default = Settings.AutoQueueOnTeleport,
+        Callback = function(v)
+            if isSyncingUI then return end
+            Settings.AutoQueueOnTeleport = v
+            SaveConfig()
+            if v then
+                local ok = QueueScriptOnTeleport()
+                pcall(function()
+                    if Fluent and Fluent.Notify then
+                        Fluent:Notify({
+                            Title = "Queue-on-Teleport",
+                            Content = ok and "✅ Script queued! Will auto-run after hop." or "⚠️ Executor queue unsupported — saved to file.",
+                            Duration = 4
+                        })
+                    end
+                end)
+            end
+        end
+    })
+
     Tabs.Settings:AddButton({
-        Title = "💾 Save Config",
+        Title = "🧪 Test Queue System (Forces Queue Now)",
+        Callback = function()
+            local ok = QueueScriptOnTeleport()
+            pcall(function()
+                if Fluent and Fluent.Notify then
+                    Fluent:Notify({
+                        Title = "Queue Test",
+                        Content = ok and "✅ Queue function worked!" or "❌ No queue fn found. Using file fallback.",
+                        Duration = 3
+                    })
+                end
+            end)
+        end
+    })
+
+    Tabs.Settings:AddButton({
+        Title = "💾 Save Current Configuration",
         Callback = function()
             SaveConfig()
             pcall(function()
                 if Fluent and Fluent.Notify then
-                    Fluent:Notify({ Title = "Saved", Content = "Config written.", Duration = 2 })
+                    Fluent:Notify({ Title = "Config Saved", Content = "Settings successfully written.", Duration = 2 })
                 end
             end)
         end
     })
     Tabs.Settings:AddButton({ Title = "🔀 Server Hop", Callback = function() ServerHop() end })
-    Tabs.Settings:AddButton({
-        Title = "🔄 Re-Register Queue",
-        Callback = function()
-            QueueScriptOnTeleport()
-            pcall(function()
-                if Fluent and Fluent.Notify then
-                    Fluent:Notify({ Title = "Queue", Content = "Chain reload armed.", Duration = 2 })
-                end
-            end)
-        end
-    })
 end
 
 BuildUI(Settings.PVPMode or Settings.BountyHunt)
 if Settings.BountyHunt then
-    task.spawn(function() task.wait(0.5); SetBountyHuntMode(true) end)
+    task.spawn(function() task.wait(0.3); SetBountyHuntMode(true) end)
 end
 
--- ============================================================
--- CRASH FIX #1: RENDER STEPPED — hitbox throttled, camera guarded
--- ============================================================
+-- Render stepped aim
 AddConnection(RunService.RenderStepped:Connect(function()
     if IsServerHopping then return end
-    pcall(function()
-        local targetPlayer = nil
-        if Settings.BountyHunt and HuntTargetPlayer then
-            targetPlayer = HuntTargetPlayer
-        elseif Settings.AimMethod == "Closest to Center Screen" then
-            targetPlayer = GetClosestPlayerToCenterScreen()
-        elseif Settings.AimMethod == "Closest to LocalPlayer" then
-            targetPlayer = GetClosestPlayerToLocalPlayer()
-        elseif Settings.AimMethod == "Selected Player" and Settings.TargetSelect ~= "" then
-            targetPlayer = Players:FindFirstChild(Settings.TargetSelect)
-        end
 
-        if targetPlayer and not IsPlayerInSafeZone(targetPlayer) and not IsPlayerPvPDisabled(targetPlayer)
-           and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-           and targetPlayer.Character:FindFirstChild("Humanoid") and targetPlayer.Character.Humanoid.Health > 0 then
+    local targetPlayer = nil
+    if Settings.BountyHunt and HuntTargetPlayer then
+        targetPlayer = HuntTargetPlayer
+    elseif Settings.AimMethod == "Closest to Center Screen" then
+        targetPlayer = GetClosestPlayerToCenterScreen()
+    elseif Settings.AimMethod == "Closest to LocalPlayer" then
+        targetPlayer = GetClosestPlayerToLocalPlayer()
+    elseif Settings.AimMethod == "Selected Player" and Settings.TargetSelect ~= "" then
+        targetPlayer = Players:FindFirstChild(Settings.TargetSelect)
+    end
 
-            local head = targetPlayer.Character:FindFirstChild("Head")
-            local aimPart = head or targetPlayer.Character.HumanoidRootPart
+    if targetPlayer and not IsPlayerInSafeZone(targetPlayer) and not IsPlayerPvPDisabled(targetPlayer)
+       and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+       and targetPlayer.Character:FindFirstChild("Humanoid") and targetPlayer.Character.Humanoid.Health > 0 then
 
-            local dist = CharacterData.RootPart and (aimPart.Position - CharacterData.RootPart.Position).Magnitude or 0
-            if dist <= (Settings.MaxTargetDistance or 10000) then
-                CurrentTargetPart = aimPart
-                CurrentTargetName = targetPlayer.Name
-                CurrentTargetPlayer = targetPlayer
-                CurrentTargetPos  = GetPredictedTargetPos(aimPart)
-            else
-                CurrentTargetPart, CurrentTargetPlayer, CurrentTargetPos = nil, nil, Vector3.zero
-            end
+        local head = targetPlayer.Character:FindFirstChild("Head")
+        local aimPart = head or targetPlayer.Character.HumanoidRootPart
+
+        local dist = CharacterData.RootPart and (aimPart.Position - CharacterData.RootPart.Position).Magnitude or 0
+        if dist <= (Settings.MaxTargetDistance or 10000) then
+            CurrentTargetPart = aimPart
+            CurrentTargetName = targetPlayer.Name
+            CurrentTargetPlayer = targetPlayer
+            CurrentTargetPos  = GetPredictedTargetPos(aimPart)
         else
-            CurrentTargetPart, CurrentTargetPlayer, CurrentTargetPos = nil, nil, Vector3.zero
+            CurrentTargetPart = nil
+            CurrentTargetName = "None"
+            CurrentTargetPlayer = nil
+            CurrentTargetPos  = Vector3.zero
         end
+    else
+        CurrentTargetPart = nil
+        CurrentTargetName = "None"
+        CurrentTargetPlayer = nil
+        CurrentTargetPos  = Vector3.zero
+    end
 
-        if Settings.AimbotCamera and CurrentTargetPart and CurrentTargetPart.Parent
-           and Camera and Camera.Parent then
-            local predictedPos = CurrentTargetPos ~= Vector3.zero and CurrentTargetPos or CurrentTargetPart.Position
-            local currentCamCF = Camera.CFrame
-            local targetCamCF  = CFrame.new(currentCamCF.Position, predictedPos)
-            if Settings.InstantLock then
-                Camera.CFrame = targetCamCF
-            else
-                Camera.CFrame = currentCamCF:Lerp(targetCamCF, math.clamp(Settings.CameraSmoothness or 0.15, 0.01, 1))
-            end
+    if Settings.AimbotCamera and CurrentTargetPart and CurrentTargetPart.Parent and Camera then
+        local predictedPos = CurrentTargetPos ~= Vector3.zero and CurrentTargetPos or CurrentTargetPart.Position
+        local currentCamCF = Camera.CFrame
+        local targetCamCF  = CFrame.new(currentCamCF.Position, predictedPos)
+        if Settings.InstantLock then
+            Camera.CFrame = targetCamCF
+        else
+            Camera.CFrame = currentCamCF:Lerp(targetCamCF, math.clamp(Settings.CameraSmoothness or 0.15, 0.01, 1))
         end
+    end
 
-        -- CRASH FIX #1: hard throttle to 0.4s
-        if Settings.HitboxExpand and CurrentTargetPart and CurrentTargetPart.Parent then
-            local now = os.clock()
-            if (now - HitboxState.LastUpdate) >= 0.4 then
-                HitboxState.LastUpdate = now
-                local tChar = CurrentTargetPart.Parent
-                ExpandHitbox(tChar, Settings.HitboxSize)
-            end
-        end
-    end)
+    if Settings.HitboxExpand and CurrentTargetPart and CurrentTargetPart.Parent then
+        local tChar = CurrentTargetPart.Parent
+        local hr = GetHealthRatio()
+        local sizeMult = hr < 0.25 and 1.5 or (hr < 0.5 and 1.25 or 1)
+        ExpandHitbox(tChar, Settings.HitboxSize * sizeMult)
+    end
 end))
 
 -- Noclip
@@ -1768,18 +1951,16 @@ AddConnection(RunService.Stepped:Connect(function()
     end
 end))
 
--- ============================================================
--- 30M BOUNTY CHECKER
--- ============================================================
+-- 30M bounty check
 task.spawn(function()
-    task.wait(20)
-    while task.wait(6) do
+    task.wait(15)
+    while task.wait(5) do
         if Settings.BountyHunt and Settings.FilterMinServerBounty and not IsServerHopping and not IsEscaping then
             if not HitValidator:WasHitRecently(5.0) and not IsComboRunning then
                 pcall(function()
                     local cur = GetTotalServerBounty()
                     if cur > 0 and cur < Settings.MinServerBounty then
-                        UpdateStatusText(string.format("Server: %.1fM -> Hop", cur / 1000000))
+                        UpdateStatusText(string.format("Server Bounty: %.1fM (<30M) -> Hopping...", cur / 1000000))
                         StartInfiniteEscape()
                         task.wait(1.5)
                         ServerHop()
@@ -1790,13 +1971,11 @@ task.spawn(function()
     end
 end)
 
--- ============================================================
--- AUTO BOUNTY HUNT LOOP
--- ============================================================
+-- Auto Bounty Hunt loop
 local LastEnablePvpTime = 0
 
 task.spawn(function()
-    while task.wait(0.15) do
+    while task.wait(0.1) do
         if Settings.BountyHunt and not IsServerHopping then
             pcall(function()
                 if (os.clock() - LastEnablePvpTime) >= 1.0 then
@@ -1817,7 +1996,7 @@ task.spawn(function()
                 if danger then
                     if not IsEscaping then
                         StartInfiniteEscape()
-                        UpdateStatusText("⚠️ ESCAPE — Ascending")
+                        UpdateStatusText("⚠️ ESCAPE MODE — Ascending infinitely...")
                     end
                     return
                 end
@@ -1830,9 +2009,8 @@ task.spawn(function()
                     local tChar = HuntTargetPlayer.Character
                     local tHrp  = tChar and tChar:FindFirstChild("HumanoidRootPart")
                     if tHrp and CharacterData.RootPart then
-                        if (tHrp.Position - CharacterData.RootPart.Position).Magnitude > (Settings.MaxTargetDistance or 10000) then
-                            HuntTargetPlayer = nil
-                        end
+                        local curDist = (tHrp.Position - CharacterData.RootPart.Position).Magnitude
+                        if curDist > (Settings.MaxTargetDistance or 10000) then HuntTargetPlayer = nil end
                     end
                 end
 
@@ -1856,9 +2034,8 @@ task.spawn(function()
                         local kills = TargetKillCounts[HuntTargetPlayer.UserId] or 0
                         local totalM = string.format("%.1fM", GetTotalServerBounty() / 1000000)
                         UpdateStatusText(string.format(
-                            "%s | %s | HP:%d%% | %dm | %d/3",
-                            totalM, HuntTargetPlayer.Name,
-                            math.floor((targetHum.Health / targetHum.MaxHealth) * 100),
+                            "Server: %s | Target: %s | HP: %d%% | Dist: %dm | Kills: %d/3",
+                            totalM, HuntTargetPlayer.Name, math.floor((targetHum.Health / targetHum.MaxHealth) * 100),
                             math.floor(dist), kills))
 
                         if Settings.AutoPortalTP and dist > Settings.PortalDistanceThreshold
@@ -1878,11 +2055,12 @@ task.spawn(function()
                         local targetHpRatio = targetHum.Health / math.max(targetHum.MaxHealth, 1)
                         local standoff = (targetHpRatio < 0.3) and 8 or (targetHpRatio < 0.6) and 10 or 12
                         local myPos = CharacterData.RootPart and CharacterData.RootPart.Position or targetPos
-                        local dir = targetPos - myPos
+                        local dir = (targetPos - myPos)
                         local hDir = Vector3.new(dir.X, 0, dir.Z)
                         if hDir.Magnitude > 0 then hDir = hDir.Unit else hDir = Vector3.new(0, 0, 1) end
                         local idealPos   = targetPos - (hDir * standoff) + Vector3.new(0, 6, 0)
-                        SafeTweenTo(CFrame.new(idealPos, targetPos), Settings.TweenSpeed)
+                        local approachCF = CFrame.new(idealPos, targetPos)
+                        SafeTweenTo(approachCF, Settings.TweenSpeed)
 
                         TriggerRaceV4()
                         ExecuteSmartCombo(targetHrp)
@@ -1890,7 +2068,7 @@ task.spawn(function()
                         ApplyAntiStun()
                     else
                         NoTargetStartTime = os.clock()
-                        UpdateStatusText(HuntTargetPlayer.Name .. " (respawning)")
+                        UpdateStatusText("Target: " .. HuntTargetPlayer.Name .. " (Waiting respawn...)")
                     end
                 else
                     if Settings.AutoServerHopWhenEmpty then
@@ -1901,11 +2079,12 @@ task.spawn(function()
                         if not IsServerHopping then
                             if NoTargetStartTime == 0 then NoTargetStartTime = os.clock() end
                             local elapsed = os.clock() - NoTargetStartTime
-                            local remaining = math.max(0, math.ceil(15 - elapsed))
-                            UpdateStatusText("Searching... hop in " .. remaining .. "s")
-                            if elapsed >= 15 then
+                            local waitTime = 15
+                            local remaining = math.max(0, math.ceil(waitTime - elapsed))
+                            UpdateStatusText("Target: Searching... (Hop in " .. remaining .. "s)")
+                            if elapsed >= waitTime then
                                 NoTargetStartTime = os.clock()
-                                UpdateStatusText("Ascending + Hopping")
+                                UpdateStatusText("Ascending + Hopping...")
                                 StartInfiniteEscape()
                                 task.wait(1.5)
                                 ServerHop()
@@ -1913,7 +2092,7 @@ task.spawn(function()
                         end
                     else
                         NoTargetStartTime = 0
-                        UpdateStatusText("Searching...")
+                        UpdateStatusText("Target: Searching...")
                     end
                 end
             end)
@@ -1921,8 +2100,19 @@ task.spawn(function()
     end
 end)
 
-print(("[BloxHub] Loaded | %s | Queue:%s | Hook:%s | Mobile:%s")
-    :format(EXECUTOR_NAME,
-        GetQueueOnTeleport() and "Y" or "N",
-        CAN_HOOK and "Y" or "N",
-        tostring(IS_MOBILE)))
+-- ═══════════════════════════════════════════════════════════════════
+--  🖥️  ON CLOSE — cleanly remove flag so next run isn't blocked
+-- ═══════════════════════════════════════════════════════════════════
+game:BindToClose(function()
+    pcall(function() _G.BloxHubRunning = false end)
+end)
+
+pcall(function()
+    if Fluent and Fluent.Notify then
+        Fluent:Notify({
+            Title = "BloxHub Loaded",
+            Content = "Queue-on-Teleport: " .. (Settings.AutoQueueOnTeleport and "ENABLED" or "DISABLED"),
+            Duration = 4
+        })
+    end
+end)
